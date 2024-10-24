@@ -16,7 +16,7 @@ import (
 
 const (
 	ipInfoAPI1 = "https://ipinfo.io"
-	ipInfoAPI2 = "https://api.ipify.org?format=json"
+	ipInfoAPI2 = "https://api6.ipify.org/?format=json"	
 )
 
 var ipInfoAPIs = [...]string{
@@ -82,93 +82,88 @@ func main() {
 	}
 	// 定期执行更新操作
 	for {
-		currentIP, err := getCurrentIP()
+		// 获取 IPv4 地址
+		currentIPv4, err := getCurrentIP(false)
 		if err != nil {
-			fmt.Println("获取当前外网地址失败:", err)
+			fmt.Println("获取当前外网IPv4地址失败:", err)
 			continue
-		}
-		fmt.Println("获取公网IP成功:", currentIP)
-		comment := ""
-		// 获取当前 DNS 记录
-		dnsRecords, err := getDNSRecord(api, zoneID, fullDomain, comment)
-		if err != nil {
-			fmt.Println("获取 DNS 记录失败:", err)
-			continue
-		}
-		dnsRecord := cloudflare.DNSRecord{}
-		if len(dnsRecords) == 0 {
-			dnsRecord, err := createDNSRecord(api, zoneID, subDomain, currentIP)
-			if err != nil {
-				fmt.Println("创建 DNS 记录失败:", err)
-				continue
-			}
-			fmt.Println("创建 DNS 记录成功:", dnsRecord.Name, currentIP)
-		} else {
-			dnsRecord = dnsRecords[0]
 		}
 
-		// 如果外网地址与 DNS 记录不一样，则更新 DNS 记录
-		if currentIP != dnsRecord.Content && dnsRecord.Content != "" {
-			fmt.Println("公网IP变化，更新DNS记录:", dnsRecord.Content+" => "+currentIP)
-			err := updateDNSRecord(api, dnsRecord.ID, zoneID, subDomain, currentIP)
-			if err != nil {
-				fmt.Println("更新 DNS 记录失败:", err)
-			} else {
-				fmt.Println("DNS 记录已更新:", dnsRecord.Name, currentIP)
-			}
-		} else {
-			fmt.Println("公网地址与 DNS 记录一致，无需更新")
+		// 获取 IPv6 地址
+		currentIPv6, err := getCurrentIP(true)
+		if err != nil {
+			fmt.Println("获取当前外网IPv6地址失败:", err)
+			continue
 		}
+
+		comment := ""
+		
+		
+		// 更新 A 记录（IPv4）
+		err = processDNSRecord(api, zoneID, fullDomain, subDomain, currentIPv4, "A", comment)
+		if err != nil {
+			fmt.Println("处理 A 记录失败:", err)
+		}
+
+		// 更新 AAAA 记录（IPv6）
+		err = processDNSRecord(api, zoneID, fullDomain, subDomain, currentIPv6, "AAAA", comment)
+		if err != nil {
+			fmt.Println("处理 AAAA 记录失败:", err)
+		}
+
 		time.Sleep(time.Duration(period) * time.Second)
 	}
 }
 
-var lastSuccessfulAPI string
 
-// getCurrentIP 获取当前外网地址
-func getCurrentIP() (string, error) {
+// getCurrentIP 获取当前外网地址，支持IPv4和IPv6
+func getCurrentIP(ipv6 bool) (string, error) {
 	for _, api := range ipInfoAPIs {
-		if lastSuccessfulAPI != "" && api != lastSuccessfulAPI {
-			continue
-		}
+
+		
 		resp, err := http.Get(api)
 		if err != nil {
-			// 记录错误日志
 			fmt.Printf("获取外网地址失败：%s\n", err)
 			continue
 		}
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			// 记录错误日志
 			fmt.Printf("读取响应体失败：%s\n", err)
 			continue
 		}
+
 		var ipInfo map[string]interface{}
 		err = json.Unmarshal(body, &ipInfo)
 		if err != nil {
-			// 记录错误日志
 			fmt.Printf("解析 JSON 失败：%s\n", err)
 			continue
 		}
-		// 如果成功获取到 IP 地址，返回它
-		if ip, ok := ipInfo["ip"].(string); ok {
-			lastSuccessfulAPI = api
-			return ip, nil
+
+		
+		var ip string
+		ip, _ = ipInfo["ip"].(string)
+
+		if ip != "" {
+			if ipv6 && strings.Contains(ip, ":") {
+				return ip, nil
+				}else if!ipv6 && strings.Contains(ip, ".") {
+					return ip, nil
+				}
+			
 		}
 	}
-	lastSuccessfulAPI = ""
-	// 如果所有 API 都失败，返回错误
 	return "", fmt.Errorf("所有 API 获取外网地址失败")
 }
 
+
 // getDNSRecord 获取指定的 Cloudflare DNS 记录
-func getDNSRecord(api *cloudflare.API, zoneID, name string, comment string) ([]cloudflare.DNSRecord, error) {
+func getDNSRecord(api *cloudflare.API, zoneID string, name string, recordType string, comment string) ([]cloudflare.DNSRecord, error) {
 
 	// 定义 ListDNSRecordsParams 参数
 	params := cloudflare.ListDNSRecordsParams{
 		Name:    name,
-		Type:    "A",
+		Type:    recordType,// A 记录或 AAAA 记录
 		Comment: comment,
 	}
 
@@ -184,13 +179,13 @@ func getDNSRecord(api *cloudflare.API, zoneID, name string, comment string) ([]c
 }
 
 // 新建DNS 记录
-func createDNSRecord(api *cloudflare.API, zoneID, subdomain, content string) (cloudflare.DNSRecord, error) {
+func createDNSRecord(api *cloudflare.API, zoneID string, subdomain, content string, recordType string) (cloudflare.DNSRecord, error) {
 	createdRecord := cloudflare.CreateDNSRecordParams{
 		Name:    subdomain,
 		Content: content,
-		Type:    "A",
+		Type:    recordType,
 		Proxied: &[]bool{false}[0],
-		ZoneID:  zoneID,
+		ID:  zoneID,
 	}
 
 	rc := &cloudflare.ResourceContainer{Identifier: zoneID}
@@ -200,24 +195,48 @@ func createDNSRecord(api *cloudflare.API, zoneID, subdomain, content string) (cl
 	return dnsRecord, err
 }
 
-// updateDNSRecord 更新指定的 Cloudflare DNS 记录
-func updateDNSRecord(api *cloudflare.API, recordID, zoneID, subdomain, content string) error {
-	// 定义更新的 DNS 记录
+// updateDNSRecord 更新指定的 Cloudflare DNS 记录，支持A和AAAA记录
+func updateDNSRecord(api *cloudflare.API, recordID, zoneID, subdomain, content, recordType string) error {
 	updatedRecord := cloudflare.UpdateDNSRecordParams{
 		ID:      recordID,
 		Name:    subdomain,
 		Content: content,
-		Type:    "A", // 假设类型是 A 记录，根据实际情况修改
+		Type:    recordType, // A 或 AAAA
 	}
 
-	// 定义 ResourceContainer
 	rc := &cloudflare.ResourceContainer{Identifier: zoneID}
-
-	// 调用 UpdateDNSRecord 函数
 	_, err := api.UpdateDNSRecord(context.Background(), rc, updatedRecord)
+	return err
+}
+//添加 processDNSRecord 函数，用于处理 DNS 更新
+func processDNSRecord(api *cloudflare.API, zoneID, fullDomain, subDomain, currentIP, recordType string,comment string) error {
+	// 获取当前 DNS 记录
+	dnsRecords, err := getDNSRecord(api, zoneID, fullDomain, recordType, comment)
 	if err != nil {
-		return err
+		return fmt.Errorf("获取 %s 记录失败: %w", recordType, err)
+	}
+	dnsRecord := cloudflare.DNSRecord{}
+	if len(dnsRecords) == 0 {
+		// 创建新 DNS 记录
+		dnsRecord, err = createDNSRecord(api, zoneID, subDomain, currentIP, recordType)
+		if err != nil {
+			return fmt.Errorf("创建 %s 记录失败: %w", recordType, err)
+		}
+		fmt.Printf("创建 %s 记录成功: %s => %s\n", recordType, dnsRecord.Name, currentIP)
+	} else {
+		dnsRecord = dnsRecords[0]
 	}
 
+	// 如果 IP 变化，更新 DNS 记录
+	if currentIP != dnsRecord.Content && dnsRecord.Content != "" {
+		fmt.Printf("公网%s IP变化，更新%s记录: %s => %s\n", recordType, recordType, dnsRecord.Content, currentIP)
+		err := updateDNSRecord(api, dnsRecord.ID, zoneID, subDomain, currentIP, recordType)
+		if err != nil {
+			return fmt.Errorf("更新 %s 记录失败: %w", recordType, err)
+		}
+		fmt.Printf("%s 记录已更新: %s => %s\n", recordType, dnsRecord.Name, currentIP)
+	} else {
+		fmt.Printf("公网%s IP 与 DNS 记录一致，无需更新\n", recordType)
+	}
 	return nil
 }
