@@ -4,6 +4,7 @@
 ### 使用
 ```
 docker run -d \
+--network host \
 -e APITOKEN=XXXXXXXXXXXXXXXXXXXXXXX \
 -e DOMAIN=example.com \
 -e PREFIX=prefix \
